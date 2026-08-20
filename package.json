@@ -1,0 +1,22 @@
+{
+  "name": "ics-lint",
+  "version": "0.1.0",
+  "description": "Parse and validate iCalendar (.ics) files with precise line and column error messages.",
+  "type": "module",
+  "main": "dist/calendar.js",
+  "types": "dist/calendar.d.ts",
+  "bin": {
+    "icslint": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "license": "MIT",
+  "author": "kwright748",
+  "engines": {
+    "node": ">=18"
+  }
+}
