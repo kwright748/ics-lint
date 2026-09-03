@@ -19,9 +19,10 @@ way a compiler error does.
 
 Early skeleton. It correctly unfolds RFC 5545 line folding, parses content
 lines (name, parameters, value), builds the `VCALENDAR` / `VEVENT` /
-component tree, and checks for a handful of required properties. It does
-not yet validate date-time formats, recurrence rules, or escape sequences
-in `TEXT` values. See "What's not here yet" below.
+component tree, checks for a handful of required properties, and validates
+the `DATE`/`DATE-TIME` format of `DTSTART` and `DTEND` values. It does not
+yet parse recurrence rules or unescape `TEXT` values. See "What's not here
+yet" below.
 
 ## Usage
 
@@ -107,8 +108,7 @@ to a real line and column, even if the property spans three folded lines.
 
 ## What's not here yet
 
-- Date-time and date value validation (`DTSTART`/`DTEND` format, `TZID`
-  cross-checks).
+- Cross-checking `TZID` parameters against declared `VTIMEZONE` components.
 - `RRULE` recurrence parsing.
 - Unescaping `TEXT` values (`\n`, `\,`, `\;`).
 - A `--json` output mode for the CLI.

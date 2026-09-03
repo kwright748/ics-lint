@@ -145,6 +145,54 @@ function parseContentLine(text: string): RawContentLine {
   return { name, nameOffset: 0, params, value: text.slice(i), valueOffset: i }
 }
 
+const DATE_RE = /^(\d{4})(\d{2})(\d{2})$/
+const DATE_TIME_RE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+}
+
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12) return false
+  const daysInMonth = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day >= 1 && day <= daysInMonth[month - 1]
+}
+
+// DTSTART/DTEND are DATE-TIME by default, or DATE when VALUE=DATE is given.
+// See RFC 5545 sections 3.3.4 (DATE) and 3.3.5 (DATE-TIME).
+function validateDateTimeValue(value: string, params: Record<string, string[]>): string | null {
+  const valueType = params.VALUE?.[0]?.toUpperCase()
+  if (valueType !== undefined && valueType !== 'DATE' && valueType !== 'DATE-TIME') {
+    return `unsupported VALUE type "${valueType}" (expected "DATE" or "DATE-TIME")`
+  }
+
+  if (valueType === 'DATE') {
+    const match = DATE_RE.exec(value)
+    if (!match) return `expected a DATE value in the form "YYYYMMDD", found "${value}"`
+    const [, year, month, day] = match
+    if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
+      return `"${value}" is not a valid calendar date`
+    }
+    return null
+  }
+
+  const match = DATE_TIME_RE.exec(value)
+  if (!match) {
+    return `expected a DATE-TIME value in the form "YYYYMMDDTHHMMSS" (optionally with a trailing "Z"), found "${value}"`
+  }
+  const [, year, month, day, hour, minute, second, utc] = match
+  if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
+    return `"${value}" is not a valid calendar date`
+  }
+  if (Number(hour) > 23) return `"${value}" has an hour out of range (00-23)`
+  if (Number(minute) > 59) return `"${value}" has a minute out of range (00-59)`
+  if (Number(second) > 60) return `"${value}" has a second out of range (00-60)`
+  if (utc && params.TZID) {
+    return `"${value}" uses the UTC "Z" designator and cannot also have a "TZID" parameter`
+  }
+  return null
+}
+
 export function parseCalendar(raw: string): CalendarComponent {
   const physicalLines = splitPhysicalLines(raw)
   const logicalLines = unfold(physicalLines)
@@ -215,6 +263,12 @@ export function parseCalendar(raw: string): CalendarComponent {
     if (stack.length === 0) {
       throw errorAtOffset(`property "${parsed.name}" appears outside of any component`, logicalLine, 0)
     }
+
+    if (parsed.name === 'DTSTART' || parsed.name === 'DTEND') {
+      const error = validateDateTimeValue(parsed.value, parsed.params)
+      if (error) throw errorAtOffset(error, logicalLine, parsed.valueOffset)
+    }
+
     stack[stack.length - 1].properties.push({
       name: parsed.name,
       params: parsed.params,
