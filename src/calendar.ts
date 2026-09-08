@@ -8,6 +8,34 @@ export interface CalendarProperty {
   value: string
   line: number
   column: number
+  // Only set for an RRULE property, once its value has parsed cleanly.
+  recurrence?: RecurrenceRule
+}
+
+export type Weekday = 'SU' | 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA'
+
+export interface ByDayRule {
+  day: Weekday
+  // e.g. the "2" in "2MO" (second Monday) or "-1" in "-1FR" (last Friday).
+  ordinal?: number
+}
+
+// The RECUR value type, RFC 5545 section 3.3.10.
+export interface RecurrenceRule {
+  freq: 'SECONDLY' | 'MINUTELY' | 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY'
+  interval: number
+  until?: string
+  count?: number
+  bySecond?: number[]
+  byMinute?: number[]
+  byHour?: number[]
+  byDay?: ByDayRule[]
+  byMonthDay?: number[]
+  byYearDay?: number[]
+  byWeekNo?: number[]
+  byMonth?: number[]
+  bySetPos?: number[]
+  wkst?: Weekday
 }
 
 export interface CalendarComponent {
@@ -193,6 +221,219 @@ function validateDateTimeValue(value: string, params: Record<string, string[]>):
   return null
 }
 
+const FREQ_VALUES = new Set(['SECONDLY', 'MINUTELY', 'HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'])
+const WEEKDAYS = new Set(['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'])
+const BYDAY_RE = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/
+
+// Thrown while scanning an RRULE value, before we know its real source
+// position; the caller maps the offset (into the value text) back to a
+// line/column the same way ContentLineError does.
+class RecurRuleError extends Error {
+  constructor(
+    message: string,
+    readonly offset: number,
+  ) {
+    super(message)
+  }
+}
+
+function validateUntilValue(value: string): string | null {
+  const dateMatch = DATE_RE.exec(value)
+  if (dateMatch) {
+    const [, year, month, day] = dateMatch
+    if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
+      return `"${value}" is not a valid calendar date`
+    }
+    return null
+  }
+  const dateTimeMatch = DATE_TIME_RE.exec(value)
+  if (!dateTimeMatch) {
+    return `expected UNTIL to be a DATE or DATE-TIME value, found "${value}"`
+  }
+  const [, year, month, day, hour, minute, second] = dateTimeMatch
+  if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
+    return `"${value}" is not a valid calendar date`
+  }
+  if (Number(hour) > 23) return `"${value}" has an hour out of range (00-23)`
+  if (Number(minute) > 59) return `"${value}" has a minute out of range (00-59)`
+  if (Number(second) > 60) return `"${value}" has a second out of range (00-60)`
+  return null
+}
+
+function parsePositiveInteger(text: string, offset: number, partName: string): number {
+  if (!/^\d+$/.test(text)) {
+    throw new RecurRuleError(`"${partName}" expects a positive integer, found "${text}"`, offset)
+  }
+  const n = Number(text)
+  if (n < 1) throw new RecurRuleError(`"${partName}" expects a positive integer, found "${text}"`, offset)
+  return n
+}
+
+// Parses a comma-separated list of signed integers, such as "BYMONTHDAY=-1,15".
+function parseIntList(
+  text: string,
+  offset: number,
+  partName: string,
+  min: number,
+  max: number,
+  disallowZero: boolean,
+): number[] {
+  const values: number[] = []
+  let i = 0
+  while (i < text.length) {
+    const start = i
+    while (i < text.length && text[i] !== ',') i++
+    const token = text.slice(start, i)
+    const tokenOffset = offset + start
+    if (i < text.length) i++
+
+    if (!/^[+-]?\d+$/.test(token)) {
+      throw new RecurRuleError(`"${partName}" value "${token}" is not an integer`, tokenOffset)
+    }
+    const n = Number(token)
+    if (disallowZero && n === 0) {
+      throw new RecurRuleError(`"${partName}" value "0" is not allowed`, tokenOffset)
+    }
+    if (n < min || n > max) {
+      throw new RecurRuleError(`"${partName}" value ${n} is out of range (${min} to ${max})`, tokenOffset)
+    }
+    values.push(n)
+  }
+  if (values.length === 0) throw new RecurRuleError(`"${partName}" expects at least one value`, offset)
+  return values
+}
+
+function parseByDayList(text: string, offset: number): ByDayRule[] {
+  const values: ByDayRule[] = []
+  let i = 0
+  while (i < text.length) {
+    const start = i
+    while (i < text.length && text[i] !== ',') i++
+    const token = text.slice(start, i)
+    const tokenOffset = offset + start
+    if (i < text.length) i++
+
+    const match = BYDAY_RE.exec(token.toUpperCase())
+    if (!match) {
+      throw new RecurRuleError(
+        `"BYDAY" value "${token}" is not valid (expected an optional ordinal followed by a weekday, e.g. "2MO" or "-1FR")`,
+        tokenOffset,
+      )
+    }
+    const [, ordinalText, day] = match
+    if (ordinalText === undefined) {
+      values.push({ day: day as Weekday })
+      continue
+    }
+    const ordinal = Number(ordinalText)
+    if (ordinal === 0 || ordinal < -53 || ordinal > 53) {
+      throw new RecurRuleError(`"BYDAY" ordinal "${ordinalText}" is out of range (-53 to 53, excluding 0)`, tokenOffset)
+    }
+    values.push({ day: day as Weekday, ordinal })
+  }
+  if (values.length === 0) throw new RecurRuleError('"BYDAY" expects at least one value', offset)
+  return values
+}
+
+// recur = recur-rule-part *( ";" recur-rule-part ), RFC 5545 section 3.3.10.
+function parseRecurrenceRule(text: string): RecurrenceRule {
+  const seen = new Set<string>()
+  const rule: Partial<RecurrenceRule> = {}
+
+  let i = 0
+  while (i < text.length) {
+    const partStart = i
+    while (i < text.length && text[i] !== ';') i++
+    const part = text.slice(partStart, i)
+    if (i < text.length) i++
+
+    if (part.length === 0) throw new RecurRuleError('empty recurrence rule part', partStart)
+
+    const eq = part.indexOf('=')
+    if (eq === -1) throw new RecurRuleError(`recurrence rule part "${part}" is missing "="`, partStart)
+    const name = part.slice(0, eq).toUpperCase()
+    const valueText = part.slice(eq + 1)
+    const valueOffset = partStart + eq + 1
+
+    if (seen.has(name)) throw new RecurRuleError(`"${name}" appears more than once`, partStart)
+    seen.add(name)
+
+    switch (name) {
+      case 'FREQ': {
+        const upper = valueText.toUpperCase()
+        if (!FREQ_VALUES.has(upper)) {
+          throw new RecurRuleError(
+            `"${valueText}" is not a valid FREQ value (expected one of SECONDLY, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY)`,
+            valueOffset,
+          )
+        }
+        rule.freq = upper as RecurrenceRule['freq']
+        break
+      }
+      case 'UNTIL': {
+        const error = validateUntilValue(valueText)
+        if (error) throw new RecurRuleError(error, valueOffset)
+        rule.until = valueText
+        break
+      }
+      case 'COUNT':
+        rule.count = parsePositiveInteger(valueText, valueOffset, 'COUNT')
+        break
+      case 'INTERVAL':
+        rule.interval = parsePositiveInteger(valueText, valueOffset, 'INTERVAL')
+        break
+      case 'BYSECOND':
+        rule.bySecond = parseIntList(valueText, valueOffset, 'BYSECOND', 0, 60, false)
+        break
+      case 'BYMINUTE':
+        rule.byMinute = parseIntList(valueText, valueOffset, 'BYMINUTE', 0, 59, false)
+        break
+      case 'BYHOUR':
+        rule.byHour = parseIntList(valueText, valueOffset, 'BYHOUR', 0, 23, false)
+        break
+      case 'BYMONTHDAY':
+        rule.byMonthDay = parseIntList(valueText, valueOffset, 'BYMONTHDAY', -31, 31, true)
+        break
+      case 'BYYEARDAY':
+        rule.byYearDay = parseIntList(valueText, valueOffset, 'BYYEARDAY', -366, 366, true)
+        break
+      case 'BYWEEKNO':
+        rule.byWeekNo = parseIntList(valueText, valueOffset, 'BYWEEKNO', -53, 53, true)
+        break
+      case 'BYMONTH':
+        rule.byMonth = parseIntList(valueText, valueOffset, 'BYMONTH', 1, 12, false)
+        break
+      case 'BYSETPOS':
+        rule.bySetPos = parseIntList(valueText, valueOffset, 'BYSETPOS', -366, 366, true)
+        break
+      case 'BYDAY':
+        rule.byDay = parseByDayList(valueText, valueOffset)
+        break
+      case 'WKST': {
+        const upper = valueText.toUpperCase()
+        if (!WEEKDAYS.has(upper)) {
+          throw new RecurRuleError(
+            `"${valueText}" is not a valid WKST weekday (expected one of SU, MO, TU, WE, TH, FR, SA)`,
+            valueOffset,
+          )
+        }
+        rule.wkst = upper as Weekday
+        break
+      }
+      default:
+        throw new RecurRuleError(`"${name}" is not a recognized recurrence rule part`, partStart)
+    }
+  }
+
+  if (!rule.freq) throw new RecurRuleError('recurrence rule is missing required "FREQ" part', 0)
+  if (rule.count !== undefined && rule.until !== undefined) {
+    throw new RecurRuleError('"COUNT" and "UNTIL" cannot both be present', 0)
+  }
+  if (rule.interval === undefined) rule.interval = 1
+
+  return rule as RecurrenceRule
+}
+
 export function parseCalendar(raw: string): CalendarComponent {
   const physicalLines = splitPhysicalLines(raw)
   const logicalLines = unfold(physicalLines)
@@ -269,12 +510,23 @@ export function parseCalendar(raw: string): CalendarComponent {
       if (error) throw errorAtOffset(error, logicalLine, parsed.valueOffset)
     }
 
+    let recurrence: RecurrenceRule | undefined
+    if (parsed.name === 'RRULE') {
+      try {
+        recurrence = parseRecurrenceRule(parsed.value)
+      } catch (err) {
+        if (err instanceof RecurRuleError) throw errorAtOffset(err.message, logicalLine, parsed.valueOffset + err.offset)
+        throw err
+      }
+    }
+
     stack[stack.length - 1].properties.push({
       name: parsed.name,
       params: parsed.params,
       value: parsed.value,
       line: position.line,
       column: position.column,
+      ...(recurrence ? { recurrence } : {}),
     })
   }
 

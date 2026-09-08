@@ -19,10 +19,10 @@ way a compiler error does.
 
 Early skeleton. It correctly unfolds RFC 5545 line folding, parses content
 lines (name, parameters, value), builds the `VCALENDAR` / `VEVENT` /
-component tree, checks for a handful of required properties, and validates
-the `DATE`/`DATE-TIME` format of `DTSTART` and `DTEND` values. It does not
-yet parse recurrence rules or unescape `TEXT` values. See "What's not here
-yet" below.
+component tree, checks for a handful of required properties, validates the
+`DATE`/`DATE-TIME` format of `DTSTART` and `DTEND` values, and parses and
+validates `RRULE` recurrence rules. It does not yet unescape `TEXT` values.
+See "What's not here yet" below.
 
 ## Usage
 
@@ -106,10 +106,17 @@ from. When something later in that logical line fails to parse, the
 offset into the unfolded string gets mapped back through those segments
 to a real line and column, even if the property spans three folded lines.
 
+Every `RRULE` property is parsed into a structured `RecurrenceRule` (on
+`property.recurrence`) and validated against RFC 5545 section 3.3.10: a
+recognized `FREQ`, integer ranges for the `BY*` parts (e.g. `BYMONTHDAY`
+in `-31..31` excluding zero), a valid `BYDAY` weekday/ordinal like `2MO` or
+`-1FR`, and the `COUNT`/`UNTIL` mutual exclusion rule. A bad part, such as
+`FREQ=DAYLY` or `BYMONTH=13`, is reported at the exact column of that part
+within the value, not just the start of the property.
+
 ## What's not here yet
 
 - Cross-checking `TZID` parameters against declared `VTIMEZONE` components.
-- `RRULE` recurrence parsing.
 - Unescaping `TEXT` values (`\n`, `\,`, `\;`).
 - A `--json` output mode for the CLI.
 - Tests.
