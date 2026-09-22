@@ -1,6 +1,7 @@
 import { IcsSyntaxError, type SourcePosition } from './errors.js'
 
 export { IcsSyntaxError } from './errors.js'
+export { unescapeText }
 
 export interface CalendarProperty {
   name: string
@@ -434,6 +435,79 @@ function parseRecurrenceRule(text: string): RecurrenceRule {
   return rule as RecurrenceRule
 }
 
+// Properties whose value type is TEXT (RFC 5545 section 3.3.11), and so are
+// subject to backslash-escaping. Some of these (CATEGORIES, RESOURCES) are
+// really comma-separated lists of TEXT, but since a CalendarProperty stores
+// its value as a single string either way, unescaping the whole thing in
+// place is enough to turn "\," and friends back into literal characters.
+const TEXT_PROPERTIES = new Set([
+  'SUMMARY',
+  'DESCRIPTION',
+  'LOCATION',
+  'COMMENT',
+  'CONTACT',
+  'UID',
+  'PRODID',
+  'TZID',
+  'RELATED-TO',
+  'CATEGORIES',
+  'RESOURCES',
+  'CLASS',
+  'STATUS',
+  'TRANSP',
+])
+
+// Thrown while unescaping a TEXT value, before we know its real source
+// position; the caller maps the offset back the same way ContentLineError
+// and RecurRuleError do.
+class TextEscapeError extends Error {
+  constructor(
+    message: string,
+    readonly offset: number,
+  ) {
+    super(message)
+  }
+}
+
+// text = *(TSAFE-CHAR / ":" / DQUOTE / ESCAPED-CHAR), RFC 5545 section 3.3.11.
+// ESCAPED-CHAR is "\\", "\;", "\,", "\N", or "\n"; everything else after a
+// backslash is invalid, and a trailing backslash has nothing left to escape.
+function unescapeText(text: string): string {
+  let result = ''
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch !== '\\') {
+      result += ch
+      i++
+      continue
+    }
+    if (i + 1 >= text.length) {
+      throw new TextEscapeError('a trailing "\\" has nothing left to escape', i)
+    }
+    const next = text[i + 1]
+    switch (next) {
+      case '\\':
+        result += '\\'
+        break
+      case ';':
+        result += ';'
+        break
+      case ',':
+        result += ','
+        break
+      case 'n':
+      case 'N':
+        result += '\n'
+        break
+      default:
+        throw new TextEscapeError(`"\\${next}" is not a recognized escape sequence`, i)
+    }
+    i += 2
+  }
+  return result
+}
+
 export function parseCalendar(raw: string): CalendarComponent {
   const physicalLines = splitPhysicalLines(raw)
   const logicalLines = unfold(physicalLines)
@@ -520,10 +594,20 @@ export function parseCalendar(raw: string): CalendarComponent {
       }
     }
 
+    let value = parsed.value
+    if (TEXT_PROPERTIES.has(parsed.name)) {
+      try {
+        value = unescapeText(parsed.value)
+      } catch (err) {
+        if (err instanceof TextEscapeError) throw errorAtOffset(err.message, logicalLine, parsed.valueOffset + err.offset)
+        throw err
+      }
+    }
+
     stack[stack.length - 1].properties.push({
       name: parsed.name,
       params: parsed.params,
-      value: parsed.value,
+      value,
       line: position.line,
       column: position.column,
       ...(recurrence ? { recurrence } : {}),

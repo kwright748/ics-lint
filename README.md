@@ -20,9 +20,9 @@ way a compiler error does.
 Early skeleton. It correctly unfolds RFC 5545 line folding, parses content
 lines (name, parameters, value), builds the `VCALENDAR` / `VEVENT` /
 component tree, checks for a handful of required properties, validates the
-`DATE`/`DATE-TIME` format of `DTSTART` and `DTEND` values, and parses and
-validates `RRULE` recurrence rules. It does not yet unescape `TEXT` values.
-See "What's not here yet" below.
+`DATE`/`DATE-TIME` format of `DTSTART` and `DTEND` values, parses and
+validates `RRULE` recurrence rules, and unescapes `TEXT` values such as
+`SUMMARY` and `DESCRIPTION`. See "What's not here yet" below.
 
 ## Usage
 
@@ -114,10 +114,16 @@ in `-31..31` excluding zero), a valid `BYDAY` weekday/ordinal like `2MO` or
 `FREQ=DAYLY` or `BYMONTH=13`, is reported at the exact column of that part
 within the value, not just the start of the property.
 
+Properties whose value type is `TEXT` (`SUMMARY`, `DESCRIPTION`, `LOCATION`,
+`UID`, `CATEGORIES`, and the rest of the list in `src/calendar.ts`) have
+their backslash escapes resolved: `\\` becomes `\`, `\;` becomes `;`, `\,`
+becomes `,`, and `\n`/`\N` become a real newline. A stray trailing
+backslash or an unrecognized escape like `\t` is a parse error, reported at
+the exact column of the bad backslash.
+
 ## What's not here yet
 
 - Cross-checking `TZID` parameters against declared `VTIMEZONE` components.
-- Unescaping `TEXT` values (`\n`, `\,`, `\;`).
 - A `--json` output mode for the CLI.
 - Tests.
 
